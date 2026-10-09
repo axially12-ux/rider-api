@@ -1,0 +1,15 @@
+info:
+  name: Nearby 1km
+  type: http
+  seq: 7
+
+http:
+  method: GET
+  url: http://localhost:3000/customer/nearby?lat=16.2467&lng=103.2528
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

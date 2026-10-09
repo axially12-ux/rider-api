@@ -1,0 +1,22 @@
+info:
+  name: Put
+  type: http
+  seq: 4
+
+http:
+  method: PUT
+  url: http://localhost:3000/customer/1
+  body:
+    type: json
+    data: |-
+      {
+        "phone": "0800000000",
+        "address": "ที่อยู่ใหม่"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

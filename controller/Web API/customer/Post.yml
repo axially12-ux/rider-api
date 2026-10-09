@@ -1,0 +1,26 @@
+info:
+  name: Post
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: http://localhost:3000/customer
+  body:
+    type: json
+    data: |-
+      {
+        "first_name": "ทดสอบ",
+        "last_name": "ระบบ",
+        "phone": "0899999999",
+        "address": "ม.มหาสารคาม",
+        "lat": 16.247,
+        "lng": 103.254
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

@@ -1,0 +1,32 @@
+{
+  "name": "rider-api",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only server.ts",
+    "start": "ts-node-dev --respawn --transpile-only server.ts",
+    "build": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.1",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@types/multer": "^2.2.0",
+    "@types/uuid": "^10.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.7",
+    "express": "^5.2.1",
+    "multer": "^2.4.0",
+    "mysql2": "^3.24.4",
+    "uuid": "^14.0.2"
+  }
+}
