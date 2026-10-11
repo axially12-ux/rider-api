@@ -87,11 +87,27 @@ const formatArrival = (minutes: number) => {
     return `${hh}:${mm}`;
 };
 
+// ตัวสุ่มแบบกำหนด seed ได้ (ผลซ้ำได้ถ้า variant เดิม) ใช้สร้างเส้นทางทางเลือก
+const seededRandom = (seed: number) => {
+    let a = seed >>> 0;
+    return () => {
+        a = (a + 0x6d2b79f5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+};
+
 /* ========== CALCULATE (คำนวณเส้นทาง ยังไม่บันทึก) ========== */
 
 // พรีวิวการจัดเส้นทาง (ใช้เฉพาะออเดอร์ pending)   POST /route/calculate
+// body (ไม่บังคับ): { variant: 0,1,2,... }  0 = แผนมาตรฐาน, 1 ขึ้นไป = เส้นทางทางเลือกที่จัดกลุ่มต่างออกไป
 router.post("/calculate", async (req, res) => {
     try {
+        const variant = Math.max(0, Math.floor(Number(req.body?.variant) || 0));
+        const rng = variant > 0 ? seededRandom(variant * 7919 + 13) : null;
+
         // ดึงพิกัดร้าน
         const [shops] = await conn.query("SELECT id,name,lat,lng FROM shop ORDER BY id LIMIT 1");
         const shop = (shops as any[])[0];
@@ -158,7 +174,9 @@ router.post("/calculate", async (req, res) => {
         for (const p of plans) {
             if (!pool.length) break;
             let pick = pool[0];
-            if (p.orders.length === 0 && plans.some(x => x.orders.length)) {
+            if (rng && !plans.some(x => x.orders.length)) {
+                pick = pool[Math.floor(rng() * pool.length)]; // ทางเลือก: เริ่มจากออเดอร์อื่นแทนออเดอร์ใกล้ร้านสุด
+            } else if (p.orders.length === 0 && plans.some(x => x.orders.length)) {
                 const seeds = plans.filter(x => x.orders.length).map(x => bearing(x.orders[0]));
                 let best = -1;
                 for (const o of pool) {
@@ -185,7 +203,8 @@ router.post("/calculate", async (req, res) => {
                 for (const o of remaining) {
                     const near = Math.min(...p.orders.map(x => distanceKm(toPoint(x), toPoint(o))));
                     const turn = Math.min(...p.orders.map(x => angleDiff(bearing(x), bearing(o))));
-                    const score = near + turn * distanceKm(shopPoint, toPoint(o)); // ใกล้กัน + ไปทางเดียวกัน
+                    const base = near + turn * distanceKm(shopPoint, toPoint(o)); // ใกล้กัน + ไปทางเดียวกัน
+                    const score = rng ? base * (0.6 + rng() * 0.8) : base; // ทางเลือก: สลับลำดับความชอบเล็กน้อย
                     if (score < pickScore) {
                         pick = o;
                         pickScore = score;
@@ -256,6 +275,7 @@ router.post("/calculate", async (req, res) => {
 
         res.json({
             method: "greedy assignment + exact stop order within each route; distances are straight-line estimates, not road routing",
+            variant,
             shop,
             settings: {
                 max_orders_per_rider: MAX_ORDERS_PER_RIDER,
