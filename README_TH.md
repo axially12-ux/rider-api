@@ -25,43 +25,37 @@ rider-api/
 ## วิธีรันโปรเจกต์
 เปิด Terminal ในโฟลเดอร์เดียวกับ `package.json` แล้วรัน:
 
-```bash
-npm install
-npm run dev
-```
-เปิด `http://localhost:3000/` หรือ `http://localhost:3000/health`
-
 ## เส้นทาง API หลัก
 ## Customer
 ```bash
-- GET http://localhost:3000/customer — ดูรายชื่อลูกค้าทั้งหมด
-- GET http://localhost:3000/customer/1 — ดูลูกค้าตาม ID
-- GET http://localhost:3000/customer/search/fields?name=สม — ค้นหาจากชื่อหรือนามสกุล
-- GET http://localhost:3000/customer/nearby?lat=16.2467&lng=103.2528 — ค้นลูกค้าในรัศมี 1 กม.
-- POST http://localhost:3000/customer — เพิ่มลูกค้า
-- PUT http://localhost:3000/customer/1 — แก้ไขลูกค้า
-- DELETE http://localhost:3000/customer/1 — ลบลูกค้า
+- GET https://rider-api-4gww.onrender.com/customer — ดูรายชื่อลูกค้าทั้งหมด
+- GET https://rider-api-4gww.onrender.com/customer/1 — ดูลูกค้าตาม ID
+- GET https://rider-api-4gww.onrender.com/customer/search/fields?name=สม — ค้นหาจากชื่อหรือนามสกุล
+- GET https://rider-api-4gww.onrender.com/customer/nearby?lat=16.2467&lng=103.2528 — ค้นลูกค้าในรัศมี 1 กม.
+- POST https://rider-api-4gww.onrender.com/customer — เพิ่มลูกค้า
+- PUT https://rider-api-4gww.onrender.com/customer/1 — แก้ไขลูกค้า
+- DELETE https://rider-api-4gww.onrender.com/customer/1 — ลบลูกค้า
 ```
 ## Order
 ```bash
-- GET http://localhost:3000/order — ดูออเดอร์ทั้งหมด
-- GET http://localhost:3000/order/1 — ดูออเดอร์ตาม ID
-- GET http://localhost:3000/order/nearby?lat=16.2467&lng=103.2528 — ค้นออเดอร์ในรัศมี 2 กม.
-- POST http://localhost:3000/order — เพิ่มออเดอร์
-- POST http://localhost:3000/order/simulate — สร้างออเดอร์ตัวอย่าง 20–30 รายการ
-- PUT http://localhost:3000/order/1 — แก้ไขจำนวนกล่อง/สถานะ
-- DELETE http://localhost:3000/order/1 — ลบออเดอร์ 1 รายการ
-- DELETE http://localhost:3000/order — ลบออเดอร์ทั้งหมด (ใช้ทดสอบเท่านั้น)
+- GET https://rider-api-4gww.onrender.com/order — ดูออเดอร์ทั้งหมด
+- GET https://rider-api-4gww.onrender.com/order/1 — ดูออเดอร์ตาม ID
+- GET https://rider-api-4gww.onrender.com/order/nearby?lat=16.2467&lng=103.2528 — ค้นออเดอร์ในรัศมี 2 กม.
+- POST https://rider-api-4gww.onrender.com/order — เพิ่มออเดอร์
+- POST https://rider-api-4gww.onrender.com/order/simulate — สร้างออเดอร์ตัวอย่าง 20–30 รายการ
+- PUT https://rider-api-4gww.onrender.com/order/1 — แก้ไขจำนวนกล่อง/สถานะ
+- DELETE https://rider-api-4gww.onrender.com/order/1 — ลบออเดอร์ 1 รายการ
+- DELETE https://rider-api-4gww.onrender.com/order — ลบออเดอร์ทั้งหมด (ใช้ทดสอบเท่านั้น)
 ```
 
 ## Route
 ```bash
-- POST http://localhost:3000/routes/calculate — พรีวิวการจัดเส้นทาง (ยังไม่บันทึก)
-- POST http://localhost:3000/routes/recalculate — บันทึกการมอบหมายเส้นทาง
-- GET http://localhost:3000/routes — ดูเส้นทางที่บันทึกแล้วทั้งหมด
-- GET http://localhost:3000/routes/1 — ดูเส้นทาง 1 เส้นพร้อมจุดส่ง
-- GET http://localhost:3000/routes/rider-job/R001 — ไรเดอร์ดูงานด้วย access code
-- PATCH http://localhost:3000/routes/stops/1/delivered — ไรเดอร์กดส่งของเสร็จ
+- POST https://rider-api-4gww.onrender.com/routes/calculate — พรีวิวการจัดเส้นทาง (ยังไม่บันทึก)
+- POST https://rider-api-4gww.onrender.com/routes/recalculate — บันทึกการมอบหมายเส้นทาง
+- GET https://rider-api-4gww.onrender.com/routes — ดูเส้นทางที่บันทึกแล้วทั้งหมด
+- GET https://rider-api-4gww.onrender.com/routes/1 — ดูเส้นทาง 1 เส้นพร้อมจุดส่ง
+- GET https://rider-api-4gww.onrender.com/routes/rider-job/R001 — ไรเดอร์ดูงานด้วย access code
+- PATCH https://rider-api-4gww.onrender.com/routes/stops/1/delivered — ไรเดอร์กดส่งของเสร็จ
 ```
 ## หมายเหตุ
 - คำสั่ง SQL ใช้ placeholder `?` สำหรับค่าที่รับมาจาก request เพื่อลดความเสี่ยง SQL injection

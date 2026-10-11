@@ -131,8 +131,9 @@ router.post("/calculate", async (req, res) => {
             return res.status(400).json({ error: "ยังไม่มีไรเดอร์ในระบบ" });
         }
 
-        // ขั้นที่ 1: จัดออเดอร์ให้ไรเดอร์แบบ greedy
-        // วนทีละออเดอร์ (เรียงจากใกล้ร้านไปไกล) แล้วให้ไรเดอร์ที่ทำให้ระยะรวมเพิ่มน้อยที่สุด
+        // ขั้นที่ 1: แบ่งออเดอร์ให้ไรเดอร์ "คนละทิศ" และเก็บออเดอร์ที่ไปทางเดียวกัน/อยู่ใกล้กันไว้เส้นทางเดียว
+        // 1) เลือกออเดอร์ตั้งต้นของไรเดอร์แต่ละคน จากออเดอร์ใกล้ร้านที่อยู่คนละทิศกันมากที่สุด
+        // 2) ไรเดอร์แต่ละคนเก็บออเดอร์ที่อยู่ใกล้กลุ่มของตัวเองที่สุดจนครบ MAX_ORDERS_PER_RIDER
         const plans = available.map(r => ({
             rider: r,
             orders: [] as any[],
@@ -141,24 +142,62 @@ router.post("/calculate", async (req, res) => {
         }));
         const remaining = [...pending].sort((a, b) => distanceKm(shopPoint, toPoint(a)) - distanceKm(shopPoint, toPoint(b)));
 
-        for (const order of remaining) {
-            let choice: any = null;
-            let choiceKm = Infinity;
+        // ทิศของออเดอร์เมื่อมองจากร้าน (เรเดียน) และผลต่างของมุม (0 - PI)
+        const bearing = (o: any) => {
+            const p = toPoint(o);
+            return Math.atan2(p.lng - shopPoint.lng, p.lat - shopPoint.lat);
+        };
+        const angleDiff = (x: number, y: number) => {
+            const d = Math.abs(x - y) % (2 * Math.PI);
+            return d > Math.PI ? 2 * Math.PI - d : d;
+        };
 
-            for (const p of plans) {
-                if (p.orders.length >= MAX_ORDERS_PER_RIDER) continue; // เต็มแล้วข้าม
-
-                const candidate = [...p.orders, order];
-                const opt = findBestStopOrder(candidate.map(toPoint), shopPoint);
-                if (opt.km < choiceKm) {
-                    choice = p;
-                    choiceKm = opt.km;
+        // เลือกจุดตั้งต้น: พิจารณาเฉพาะออเดอร์ที่ใกล้ร้านก่อน (อย่างน้อยพอสำหรับทุกคัน) แล้วเลือกให้ทิศห่างจากที่เลือกแล้วมากที่สุด
+        const poolSize = Math.min(remaining.length, Math.max(plans.length * MAX_ORDERS_PER_RIDER * 2, 15));
+        const pool = remaining.slice(0, poolSize);
+        for (const p of plans) {
+            if (!pool.length) break;
+            let pick = pool[0];
+            if (p.orders.length === 0 && plans.some(x => x.orders.length)) {
+                const seeds = plans.filter(x => x.orders.length).map(x => bearing(x.orders[0]));
+                let best = -1;
+                for (const o of pool) {
+                    const sep = Math.min(...seeds.map(sd => angleDiff(bearing(o), sd)));
+                    if (sep > best) {
+                        best = sep;
+                        pick = o;
+                    }
                 }
             }
+            p.orders.push(pick);
+            pool.splice(pool.indexOf(pick), 1);
+            remaining.splice(remaining.indexOf(pick), 1);
+        }
 
-            if (!choice) continue; // ไรเดอร์เต็มทุกคน -> ออเดอร์นี้จะไปอยู่ใน unassigned
-            choice.orders.push(order);
-            choice.km = choiceKm;
+        // เก็บออเดอร์เพิ่มให้ไรเดอร์ที่ยังไม่เต็ม: ครั้งละ 1 ออเดอร์ เลือกออเดอร์ที่ใกล้จุดในเส้นทางของเขาที่สุด
+        let added = true;
+        while (added && remaining.length) {
+            added = false;
+            for (const p of plans) {
+                if (!p.orders.length || p.orders.length >= MAX_ORDERS_PER_RIDER || !remaining.length) continue;
+                let pick: any = null;
+                let pickScore = Infinity;
+                for (const o of remaining) {
+                    const near = Math.min(...p.orders.map(x => distanceKm(toPoint(x), toPoint(o))));
+                    const turn = Math.min(...p.orders.map(x => angleDiff(bearing(x), bearing(o))));
+                    const score = near + turn * distanceKm(shopPoint, toPoint(o)); // ใกล้กัน + ไปทางเดียวกัน
+                    if (score < pickScore) {
+                        pick = o;
+                        pickScore = score;
+                    }
+                }
+                p.orders.push(pick);
+                remaining.splice(remaining.indexOf(pick), 1);
+                added = true;
+            }
+        }
+        for (const p of plans) {
+            if (p.orders.length) p.km = findBestStopOrder(p.orders.map(toPoint), shopPoint).km;
         }
 
         // ออเดอร์ที่จัดไม่ได้ (ไรเดอร์ไม่พอ)

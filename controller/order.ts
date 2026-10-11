@@ -102,14 +102,23 @@ router.post("/simulate", async (_req, res) => {
             return res.status(400).json({ error: "ยังไม่มีลูกค้าในระบบ" });
         }
 
-        // สุ่มจำนวนออเดอร์ 20-30 รายการ แต่ละรายการสุ่มลูกค้าและจำนวนกล่อง 1-3
+        // สุ่มจำนวนออเดอร์ 20-30 รายการ แต่ละรายการสุ่มจำนวนกล่อง 1-3
+        // สุ่มลูกค้า "ไม่ซ้ำกัน" ในรอบเดียว (สลับลำดับแล้วหยิบทีละคน)
+        // จะวนกลับมาซ้ำก็ต่อเมื่อจำนวนลูกค้ามีน้อยกว่าจำนวนออเดอร์ที่จะสร้าง
+        const shuffle = (a: number[]) => {
+            const r = [...a];
+            for (let i = r.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [r[i], r[j]] = [r[j], r[i]];
+            }
+            return r;
+        };
         const count = 20 + Math.floor(Math.random() * 11);
         const values: number[][] = [];
+        let pool: number[] = [];
         for (let i = 0; i < count; i++) {
-            values.push([
-                ids[Math.floor(Math.random() * ids.length)],
-                1 + Math.floor(Math.random() * 3),
-            ]);
+            if (!pool.length) pool = shuffle(ids);
+            values.push([pool.pop() as number, 1 + Math.floor(Math.random() * 3)]);
         }
 
         const [result] = await conn.query("INSERT INTO orders(customer_id, boxes) VALUES ?", [values]);
