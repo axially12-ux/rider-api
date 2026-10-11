@@ -527,3 +527,58 @@ router.patch("/stops/:order_id/delivered", async (req, res) => {
         res.status(500).json({ error: "Database update failed" });
     }
 });
+
+/* ========== DELETE ========== */
+
+// ลบเส้นทางทั้งหมด (ออเดอร์ที่ยังไม่ส่งจะกลับเป็น pending)   DELETE /routes
+// ต้องวางก่อน "/:id" เพื่อไม่ให้ชื่อชนกัน
+router.delete("/", async (_req, res) => {
+    const cx = await conn.getConnection();
+    try {
+        await cx.beginTransaction();
+        await cx.query(
+            "UPDATE orders SET status='pending' WHERE status='assigned' AND id IN (SELECT order_id FROM route_stops)"
+        );
+        await cx.query("DELETE FROM route_stops");
+        const [result] = await cx.query("DELETE FROM routes");
+        await cx.commit();
+        res.json({ message: "ลบเส้นทางทั้งหมดแล้ว", affected_row: (result as any).affectedRows });
+    } catch (e) {
+        await cx.rollback();
+        console.error(e);
+        res.status(500).json({ error: "ลบเส้นทางไม่สำเร็จ" });
+    } finally {
+        cx.release();
+    }
+});
+
+// ลบเส้นทาง 1 เส้น (ออเดอร์ที่ยังไม่ส่งในเส้นทางนั้นจะกลับเป็น pending ให้จัดใหม่ได้)   DELETE /routes/1
+router.delete("/:id", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) {
+        return res.status(400).json({ error: "id ต้องเป็นจำนวนเต็มบวก" });
+    }
+    const cx = await conn.getConnection();
+    try {
+        await cx.beginTransaction();
+        const [found] = await cx.query("SELECT id FROM routes WHERE id=? FOR UPDATE", [id]);
+        if (!(found as any[]).length) {
+            await cx.rollback();
+            return res.status(404).json({ error: "ไม่พบเส้นทาง" });
+        }
+        await cx.query(
+            "UPDATE orders SET status='pending' WHERE status='assigned' AND id IN (SELECT order_id FROM route_stops WHERE route_id=?)",
+            [id]
+        );
+        await cx.query("DELETE FROM route_stops WHERE route_id=?", [id]);
+        await cx.query("DELETE FROM routes WHERE id=?", [id]);
+        await cx.commit();
+        res.json({ message: "ลบเส้นทางแล้ว", id });
+    } catch (e) {
+        await cx.rollback();
+        console.error(e);
+        res.status(500).json({ error: "ลบเส้นทางไม่สำเร็จ" });
+    } finally {
+        cx.release();
+    }
+});
