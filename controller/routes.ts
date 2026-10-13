@@ -621,31 +621,74 @@ router.get("/:id", async (req, res) => {
     }
 });
 
-// ไรเดอร์ดูงานล่าสุดของตัวเองด้วยรหัสเข้าดูงาน   GET /route/rider-job/:access_code
+// ไรเดอร์ดูงานล่าสุดของตัวเองด้วยเลขใบงาน   GET /routes/rider-job/:access_code
+// ส่งกลับ: ข้อมูลไรเดอร์, เส้นทาง, ร้าน (จุดรับของ), จุดส่งพร้อมเวลาถึงโดยประมาณ/ระยะทาง/ยอดเงิน และสรุปงาน
 router.get("/rider-job/:access_code", async (req, res) => {
     try {
-        // หาไรเดอร์จาก access_code
+        const code = String(req.params.access_code || "").trim();
+        if (!code) {
+            return res.status(400).json({ error: "กรุณากรอกเลขใบงาน" });
+        }
+
+        // หาไรเดอร์จาก access_code (ไม่สนตัวพิมพ์เล็ก/ใหญ่)
         const [riders] = await conn.query(
-            "SELECT id,name,phone FROM riders WHERE access_code=?",
-            [req.params.access_code]
+            "SELECT id,name,phone FROM riders WHERE UPPER(access_code)=UPPER(?)",
+            [code]
         );
         const rider = (riders as any[])[0];
         if (!rider) {
-            return res.status(404).json({ error: "รหัสเข้าดูงานไม่ถูกต้อง" });
+            return res.status(404).json({ error: "เลขใบงานไม่ถูกต้อง หรือถูกแทนที่ด้วยเลขใหม่แล้ว" });
         }
+
+        const [shops] = await conn.query("SELECT id,name,lat,lng FROM shop ORDER BY id LIMIT 1");
+        const shop = (shops as any[])[0] ?? null;
 
         // เอาเส้นทางล่าสุดของไรเดอร์คนนี้
         const [routes] = await conn.query(
-            "SELECT id route_id, total_km, total_cost, created_at FROM routes WHERE rider_id=? ORDER BY created_at DESC LIMIT 1",
+            "SELECT id route_id, total_km, total_cost, created_at FROM routes WHERE rider_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
             [rider.id]
         );
         if (!(routes as any[]).length) {
-            return res.json({ rider, route: null, message: "ยังไม่มีงานที่ได้รับมอบหมาย" });
+            return res.json({ rider, shop, route: null, message: "ยังไม่มีงานที่ได้รับมอบหมาย" });
         }
         const route = (routes as any[])[0];
 
-        const [stops] = await conn.query(SELECT_STOPS, [route.route_id]);
-        res.json({ rider, route, stops });
+        const [rawStops] = await conn.query(SELECT_STOPS, [route.route_id]);
+
+        // คำนวณระยะแต่ละช่วง + เวลาถึงโดยประมาณ (ใช้สูตรเดียวกับตอนจัดเส้นทาง)
+        let prev: Point | null = shop ? toPoint(shop) : null;
+        let cumKm = 0;
+        const stops = (rawStops as any[]).map((s, i) => {
+            const pt = toPoint(s);
+            const leg = prev ? distanceKm(prev, pt) : 0;
+            cumKm += leg;
+            prev = pt;
+            const arrive = arrivalMinutes(cumKm, i + 1);
+            return {
+                ...s,
+                leg_km: Number(leg.toFixed(2)),
+                arrive_time: shop ? formatArrival(arrive) : null,
+                amount: Number(s.boxes) * PRICE_PER_BOX,
+            };
+        });
+
+        const boxes = stops.reduce((t, s) => t + Number(s.boxes), 0);
+        const delivered = stops.filter(s => s.status === "delivered").length;
+        res.json({
+            rider,
+            shop,
+            route,
+            stops,
+            summary: {
+                stops: stops.length,
+                delivered,
+                remaining: stops.length - delivered,
+                total_boxes: boxes,
+                total_amount: boxes * PRICE_PER_BOX,
+                last_arrival: stops.length ? stops[stops.length - 1].arrive_time : null,
+                deadline: formatArrival(DEADLINE_MINUTES),
+            },
+        });
     } catch (e) {
         console.error(e);
         res.status(500).json({ error: "Database query failed" });
@@ -654,14 +697,29 @@ router.get("/rider-job/:access_code", async (req, res) => {
 
 /* ========== UPDATE (PATCH) ========== */
 
-// ไรเดอร์กดส่งของเสร็จ (assigned -> delivered)   PATCH /route/stops/1/delivered
+// ไรเดอร์กดส่งของเสร็จ (assigned -> delivered)   PATCH /routes/stops/1/delivered   body: { code }
+// ถ้าส่ง code (เลขใบงาน) มา จะตรวจว่าออเดอร์นี้อยู่ในเส้นทางล่าสุดของไรเดอร์คนนั้นจริง กันกดผิดงานของคนอื่น
 router.patch("/stops/:order_id/delivered", async (req, res) => {
     const id = Number(req.params.order_id);
     if (!Number.isInteger(id) || id < 1) {
         return res.status(400).json({ error: "order_id ไม่ถูกต้อง" });
     }
+    const code = String(req.body?.code ?? "").trim();
 
     try {
+        if (code) {
+            const [own] = await conn.query(
+                "SELECT rs.order_id FROM route_stops rs " +
+                "JOIN routes r ON r.id = rs.route_id " +
+                "JOIN riders ri ON ri.id = r.rider_id " +
+                "WHERE rs.order_id=? AND UPPER(ri.access_code)=UPPER(?) " +
+                "AND r.id = (SELECT MAX(id) FROM routes WHERE rider_id = ri.id)",
+                [id, code]
+            );
+            if (!(own as any[]).length) {
+                return res.status(403).json({ error: `ออเดอร์ #${id} ไม่ใช่งานของใบงานนี้` });
+            }
+        }
         const [result] = await conn.query(
             "UPDATE orders SET status='delivered' WHERE id=? AND status='assigned'",
             [id]
