@@ -1,5 +1,5 @@
 import express from "express";
-import { conn } from "../dbconnect";
+import { conn, schema } from "../dbconnect";
 import { Order } from "../model/order";
 
 export const router = express.Router();
@@ -15,6 +15,21 @@ const ORDER_COLUMNS =
 const SELECT_ORDER =
     `SELECT ${ORDER_COLUMNS} FROM orders o JOIN customers c ON c.id = o.customer_id`;
 
+// ออเดอร์ + ไรเดอร์ที่รับงาน + เวลาส่งจริง (ใช้กับหน้ารายการ/รายละเอียดออเดอร์)
+// หาเส้นทางล่าสุดที่ออเดอร์นี้อยู่ แล้วโยงไปถึงไรเดอร์ (ออเดอร์ pending ยังไม่มีไรเดอร์ -> NULL)
+// rider_access_code แสดงเฉพาะเมื่อเป็นเลขใบงานปัจจุบันของไรเดอร์ (เลขเก่าถูกแทนที่แล้วจะไม่แสดง)
+const selectOrderWithRider = () =>
+    `SELECT ${ORDER_COLUMNS}, ` +
+    (schema.deliveredAt ? "o.delivered_at, " : "") +
+    "IF(o.status='pending', NULL, rt.id) route_id, " +
+    "IF(o.status='pending', NULL, rd.id) rider_id, " +
+    "IF(o.status='pending', NULL, rd.name) rider_name, " +
+    "IF(o.status='pending' OR rt.id <> (SELECT MAX(id) FROM routes WHERE rider_id = rd.id), NULL, rd.access_code) rider_access_code " +
+    "FROM orders o JOIN customers c ON c.id = o.customer_id " +
+    "LEFT JOIN (SELECT order_id, MAX(route_id) route_id FROM route_stops GROUP BY order_id) lrs ON lrs.order_id = o.id " +
+    "LEFT JOIN routes rt ON rt.id = lrs.route_id " +
+    "LEFT JOIN riders rd ON rd.id = rt.rider_id";
+
 // ตรวจว่า id เป็นจำนวนเต็มบวก
 const validId = (v: string) => Number.isInteger(Number(v)) && Number(v) > 0;
 
@@ -26,7 +41,7 @@ const validBoxes = (n: number) => Number.isInteger(n) && n >= 1 && n <= 3;
 // แสดงออเดอร์ทั้งหมด   GET /order
 router.get("/", async (_req, res) => {
     try {
-        const [rows] = await conn.query(SELECT_ORDER + " ORDER BY o.id");
+        const [rows] = await conn.query(selectOrderWithRider() + " ORDER BY o.id");
         res.json(rows);
     } catch (e) {
         console.error(e);
@@ -77,7 +92,7 @@ router.get("/:id", async (req, res) => {
             return res.status(400).json({ error: "Invalid order id" });
         }
 
-        const [rows] = await conn.query(SELECT_ORDER + " WHERE o.id=?", [Number(req.params.id)]);
+        const [rows] = await conn.query(selectOrderWithRider() + " WHERE o.id=?", [Number(req.params.id)]);
         const list = rows as Order[];
 
         if (!list.length) {
@@ -186,10 +201,18 @@ router.put("/:id", async (req, res) => {
             return res.status(400).json({ error: "status must be pending, assigned, or delivered" });
         }
 
-        const [result] = await conn.query(
-            "UPDATE orders SET boxes=?, status=? WHERE id=?",
-            [boxes, status, id]
-        );
+        // เก็บ/ล้างเวลาส่งจริงให้ตรงกับสถานะ (แก้เป็น delivered = ส่งเมื่อตอนนี้, แก้กลับ = ล้างเวลา)
+        let sql = "UPDATE orders SET boxes=?, status=? WHERE id=?";
+        let params: any[] = [boxes, status, id];
+        if (schema.deliveredAt) {
+            if (status !== "delivered") {
+                sql = "UPDATE orders SET boxes=?, status=?, delivered_at=NULL WHERE id=?";
+            } else if (!(existing as any).delivered_at) {
+                sql = "UPDATE orders SET boxes=?, status=?, delivered_at=? WHERE id=?";
+                params = [boxes, status, new Date(), id];
+            }
+        }
+        const [result] = await conn.query(sql, params);
         res.json({ affected_row: (result as any).affectedRows, id });
     } catch (e) {
         console.error(e);
