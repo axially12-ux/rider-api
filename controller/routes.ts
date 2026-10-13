@@ -286,7 +286,7 @@ router.post("/calculate", async (req, res) => {
         const available = [...realRiders];
         while (available.length < Math.min(pending.length, MAX_RIDERS)) {
             const k = available.length - realRiders.length + 1;
-            available.push({ id: -k, name: `ไรเดอร์ใหม่ ${k}`, phone: "", access_code: null, is_new: true });
+            available.push({ id: -k, name: `ไรเดอร์ ${available.length + 1}`, phone: "", access_code: null, is_new: true });
         }
 
         const emptySummary = {
