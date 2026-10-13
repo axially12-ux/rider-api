@@ -6,7 +6,7 @@ export const router = express.Router();
 /* ========== Config (ค่าคงที่ของระบบ) ========== */
 
 const MAX_ORDERS_PER_RIDER = 3;       // ไรเดอร์หนึ่งคนรับได้สูงสุดกี่ออเดอร์
-const SPEED_KMH = 25;                 // ความเร็วเฉลี่ยของไรเดอร์ (กม./ชม.)
+const SPEED_KMH = 30;                 // ความเร็วเฉลี่ยของไรเดอร์ (กม./ชม.) ตามโจทย์
 const SERVICE_MINUTES_PER_STOP = 3;   // เวลาส่งของต่อ 1 จุด (นาที)
 const FOOD_COST_PER_BOX = 40;         // ต้นทุนอาหารต่อกล่อง
 const PRICE_PER_BOX = 65;             // ราคาขายต่อกล่อง
@@ -99,14 +99,140 @@ const seededRandom = (seed: number) => {
     };
 };
 
+// เลขใบงานของไรเดอร์ ออกใหม่ทุกครั้งที่บันทึกเส้นทาง เช่น 1013-007-48 (เดือนวัน-รหัสไรเดอร์-เลขสุ่ม) ใช้เวลาไทย
+const makeJobCode = (riderId: number) => {
+    const d = new Date(Date.now() + 7 * 3600 * 1000);
+    const mmdd = String(d.getUTCMonth() + 1).padStart(2, "0") + String(d.getUTCDate()).padStart(2, "0");
+    return `${mmdd}-${String(riderId).padStart(3, "0")}-${10 + Math.floor(Math.random() * 90)}`;
+};
+
+/* ========== Optimizer (แบ่งออเดอร์ให้ไรเดอร์) ========== */
+
+const MAX_RIDERS = 100;           // ร้านเรียกไรเดอร์เพิ่มได้ (เพดานต่อรอบ)
+const DEADLINE_MINUTES = 60;      // ออกส่ง 11:30 ต้องถึงลูกค้าไม่เกิน 12:30
+const LATE_PENALTY_PER_MIN = 50;  // โทษถ้าส่งช้า (บาท/นาที) เพื่อให้ตัวคำนวณเลี่ยงแผนที่ส่งไม่ทัน
+
+// ตัวสุ่มที่กำหนด seed ได้ -> "ทางเลือกที่ N" ได้ผลเดิมทุกครั้ง
+function makeRng(seed: number) {
+    let a = (Math.imul(seed + 1, 2654435761) >>> 0) || 1;
+    return () => {
+        a = (a + 0x6d2b79f5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+// เวลาที่ไรเดอร์ถึงลูกค้าคนสุดท้าย (นาที นับจาก 11:30) = เวลาขับ + เวลาส่งของจุดก่อนหน้า
+const arrivalMinutes = (kmToLast: number, stops: number) =>
+    (kmToLast / SPEED_KMH) * 60 + Math.max(0, stops - 1) * SERVICE_MINUTES_PER_STOP;
+
+// "คะแนน" ของไรเดอร์ 1 คน = ค่าตอบแทนไรเดอร์ + โทษส่งช้า (ยิ่งต่ำยิ่งดี)
+function tripScore(orders: any[], shop: Point) {
+    if (!orders.length) return 0;
+    const opt = findBestStopOrder(orders.map(toPoint), shop);
+    const boxes = orders.reduce((s, o) => s + Number(o.boxes), 0);
+    const late = Math.max(0, arrivalMinutes(opt.km, orders.length) - DEADLINE_MINUTES);
+    return calcRiderCost(opt.km, boxes) + late * LATE_PENALTY_PER_MIN;
+}
+
+// แบ่ง orders เป็นกลุ่ม (ไรเดอร์ละกลุ่ม ไม่เกิน 3) ให้ต้นทุนรวมต่ำสุด:
+// เริ่มจากแบ่งตามทิศ (สุ่มจุดเริ่ม) แล้วปรับปรุงด้วยการย้าย/สลับออเดอร์จนไม่ดีขึ้นอีก
+function optimizeGroups(orders: any[], riderSlots: number, shop: Point, rng: () => number, cache: Map<string, number>) {
+    const score = (g: any[]) => {
+        if (!g.length) return 0;
+        const key = g.map(o => o.id).sort((x, y) => x - y).join(",");
+        let v = cache.get(key);
+        if (v === undefined) {
+            v = tripScore(g, shop);
+            cache.set(key, v);
+        }
+        return v;
+    };
+
+    const slots = Math.min(riderSlots, orders.length);
+    const bearingOf = (o: any) => {
+        const p = toPoint(o);
+        return Math.atan2(p.lng - shop.lng, p.lat - shop.lat);
+    };
+    const offset = rng() * 2 * Math.PI;
+    const keyed = orders
+        .map(o => ({ o, k: (((bearingOf(o) - offset) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI) + (rng() - 0.5) * 0.5 }))
+        .sort((x, y) => x.k - y.k)
+        .map(x => x.o);
+
+    const groups: any[][] = Array.from({ length: slots }, () => []);
+    keyed.forEach((o, i) => groups[Math.floor(i / MAX_ORDERS_PER_RIDER)].push(o));
+
+    const shuffle = <T,>(arr: T[]) => {
+        for (let i = arr.length - 1; i > 0; i--) {
+            const j = Math.floor(rng() * (i + 1));
+            [arr[i], arr[j]] = [arr[j], arr[i]];
+        }
+        return arr;
+    };
+
+    for (let pass = 0; pass < 40; pass++) {
+        let changed = false;
+
+        // ย้ายออเดอร์ไปกลุ่มอื่น (รวมกลุ่มว่าง 1 กลุ่ม) ถ้าต้นทุนรวมลดลง
+        for (const o of shuffle([...orders])) {
+            const a = groups.findIndex(g => g.includes(o));
+            const without = groups[a].filter(x => x !== o);
+            let bestB = -1;
+            let bestDelta = -1e-9;
+            let triedEmpty = false;
+            for (let b = 0; b < groups.length; b++) {
+                if (b === a || groups[b].length >= MAX_ORDERS_PER_RIDER) continue;
+                if (!groups[b].length) {
+                    if (triedEmpty) continue;
+                    triedEmpty = true;
+                }
+                const delta = score(without) + score([...groups[b], o]) - score(groups[a]) - score(groups[b]);
+                if (delta < bestDelta) {
+                    bestDelta = delta;
+                    bestB = b;
+                }
+            }
+            if (bestB >= 0) {
+                groups[bestB] = [...groups[bestB], o];
+                groups[a] = without;
+                changed = true;
+            }
+        }
+
+        // สลับออเดอร์ระหว่าง 2 กลุ่ม ถ้าต้นทุนรวมลดลง
+        for (const x of shuffle([...orders])) {
+            for (const y of shuffle([...orders])) {
+                const a = groups.findIndex(g => g.includes(x));
+                const b = groups.findIndex(g => g.includes(y));
+                if (a === b) continue;
+                const na = [...groups[a].filter(o => o !== x), y];
+                const nb = [...groups[b].filter(o => o !== y), x];
+                if (score(na) + score(nb) < score(groups[a]) + score(groups[b]) - 1e-9) {
+                    groups[a] = na;
+                    groups[b] = nb;
+                    changed = true;
+                }
+            }
+        }
+        if (!changed) break;
+    }
+
+    const used = groups.filter(g => g.length);
+    return { groups: used, total: used.reduce((s, g) => s + score(g), 0) };
+}
+
 /* ========== CALCULATE (คำนวณเส้นทาง ยังไม่บันทึก) ========== */
 
-// พรีวิวการจัดเส้นทาง (ใช้เฉพาะออเดอร์ pending)   POST /route/calculate
-// body (ไม่บังคับ): { variant: 0,1,2,... }  0 = แผนมาตรฐาน, 1 ขึ้นไป = เส้นทางทางเลือกที่จัดกลุ่มต่างออกไป
+// พรีวิวการจัดเส้นทาง (ใช้เฉพาะออเดอร์ pending)   POST /routes/calculate
+// body (ไม่บังคับ): { variant: 0, tries: 1 }
+//   variant = หมายเลขทางเลือก (เปลี่ยนเลขเพื่อให้ได้แผนอื่น)
+//   tries   = ลองกี่แผนแล้วเลือกต้นทุนต่ำสุด (ใช้ตอน "หาแผนที่ดีที่สุด" เช่น 40)
 router.post("/calculate", async (req, res) => {
     try {
         const variant = Math.max(0, Math.floor(Number(req.body?.variant) || 0));
-        const rng = variant > 0 ? seededRandom(variant * 7919 + 13) : null;
+        const tries = Math.min(60, Math.max(1, Math.floor(Number(req.body?.tries) || 1)));
 
         // ดึงพิกัดร้าน
         const [shops] = await conn.query("SELECT id,name,lat,lng FROM shop ORDER BY id LIMIT 1");
@@ -122,117 +248,73 @@ router.post("/calculate", async (req, res) => {
             "FROM orders o JOIN customers c ON c.id=o.customer_id " +
             "WHERE o.status='pending' ORDER BY o.id"
         );
-        const [riders] = await conn.query("SELECT id,name,phone FROM riders ORDER BY id");
+        const [riders] = await conn.query("SELECT id,name,phone,access_code FROM riders ORDER BY id");
         const pending = orders as any[];
-        const available = riders as any[];
+        const realRiders = riders as any[];
+        // ไรเดอร์ในระบบไม่พอ -> เรียกเพิ่มอัตโนมัติ (rider_id ติดลบ = ยังไม่มีในฐานข้อมูล จะสร้างตอนกด "บันทึก")
+        const available = [...realRiders];
+        while (available.length < Math.min(pending.length, MAX_RIDERS)) {
+            const k = available.length - realRiders.length + 1;
+            available.push({ id: -k, name: `ไรเดอร์ใหม่ ${k}`, phone: "", access_code: null, is_new: true });
+        }
 
+        const emptySummary = {
+            orders: 0, orders_assigned: 0, orders_unassigned: 0, riders_used: 0,
+            total_km: 0, total_rider_cost: 0, revenue: 0, food_cost: 0,
+            profit_before_other_expenses: 0, within_one_hour: true,
+        };
         // ไม่มีออเดอร์ให้จัด -> ตอบผลว่างพร้อมสรุปเป็น 0
         if (!pending.length) {
             return res.json({
                 message: "ไม่มีออเดอร์ pending สำหรับจัดเส้นทาง",
-                routes: [],
-                unassigned: [],
-                summary: {
-                    orders: 0,
-                    riders: 0,
-                    total_km: 0,
-                    total_rider_cost: 0,
-                    revenue: 0,
-                    food_cost: 0,
-                    profit_before_other_expenses: 0,
-                },
+                shop, routes: [], unassigned: [], summary: emptySummary, variant, tries,
             });
         }
         if (!available.length) {
             return res.status(400).json({ error: "ยังไม่มีไรเดอร์ในระบบ" });
         }
 
-        // ขั้นที่ 1: แบ่งออเดอร์ให้ไรเดอร์ "คนละทิศ" และเก็บออเดอร์ที่ไปทางเดียวกัน/อยู่ใกล้กันไว้เส้นทางเดียว
-        // 1) เลือกออเดอร์ตั้งต้นของไรเดอร์แต่ละคน จากออเดอร์ใกล้ร้านที่อยู่คนละทิศกันมากที่สุด
-        // 2) ไรเดอร์แต่ละคนเก็บออเดอร์ที่อยู่ใกล้กลุ่มของตัวเองที่สุดจนครบ MAX_ORDERS_PER_RIDER
-        const plans = available.map(r => ({
-            rider: r,
-            orders: [] as any[],
-            km: 0,
-            stops: [] as any[],
-        }));
-        const remaining = [...pending].sort((a, b) => distanceKm(shopPoint, toPoint(a)) - distanceKm(shopPoint, toPoint(b)));
+        // ไรเดอร์รับได้คนละไม่เกิน 3 ออเดอร์ -> ถ้าไรเดอร์ไม่พอ ส่งออเดอร์ที่ใกล้ร้านก่อน ที่เหลือเป็น unassigned
+        const byDistance = [...pending].sort((a, b) => distanceKm(shopPoint, toPoint(a)) - distanceKm(shopPoint, toPoint(b)));
+        const capacity = available.length * MAX_ORDERS_PER_RIDER;
+        const toPlan = byDistance.slice(0, capacity);
+        const leftover = byDistance.slice(capacity);
 
-        // ทิศของออเดอร์เมื่อมองจากร้าน (เรเดียน) และผลต่างของมุม (0 - PI)
-        const bearing = (o: any) => {
-            const p = toPoint(o);
-            return Math.atan2(p.lng - shopPoint.lng, p.lat - shopPoint.lat);
-        };
-        const angleDiff = (x: number, y: number) => {
-            const d = Math.abs(x - y) % (2 * Math.PI);
-            return d > Math.PI ? 2 * Math.PI - d : d;
-        };
-
-        // เลือกจุดตั้งต้น: พิจารณาเฉพาะออเดอร์ที่ใกล้ร้านก่อน (อย่างน้อยพอสำหรับทุกคัน) แล้วเลือกให้ทิศห่างจากที่เลือกแล้วมากที่สุด
-        const poolSize = Math.min(remaining.length, Math.max(plans.length * MAX_ORDERS_PER_RIDER * 2, 15));
-        const pool = remaining.slice(0, poolSize);
-        for (const p of plans) {
-            if (!pool.length) break;
-            let pick = pool[0];
-            if (rng && !plans.some(x => x.orders.length)) {
-                pick = pool[Math.floor(rng() * pool.length)]; // ทางเลือก: เริ่มจากออเดอร์อื่นแทนออเดอร์ใกล้ร้านสุด
-            } else if (p.orders.length === 0 && plans.some(x => x.orders.length)) {
-                const seeds = plans.filter(x => x.orders.length).map(x => bearing(x.orders[0]));
-                let best = -1;
-                for (const o of pool) {
-                    const sep = Math.min(...seeds.map(sd => angleDiff(bearing(o), sd)));
-                    if (sep > best) {
-                        best = sep;
-                        pick = o;
-                    }
-                }
-            }
-            p.orders.push(pick);
-            pool.splice(pool.indexOf(pick), 1);
-            remaining.splice(remaining.indexOf(pick), 1);
-        }
-
-        // เก็บออเดอร์เพิ่มให้ไรเดอร์ที่ยังไม่เต็ม: ครั้งละ 1 ออเดอร์ เลือกออเดอร์ที่ใกล้จุดในเส้นทางของเขาที่สุด
-        let added = true;
-        while (added && remaining.length) {
-            added = false;
-            for (const p of plans) {
-                if (!p.orders.length || p.orders.length >= MAX_ORDERS_PER_RIDER || !remaining.length) continue;
-                let pick: any = null;
-                let pickScore = Infinity;
-                for (const o of remaining) {
-                    const near = Math.min(...p.orders.map(x => distanceKm(toPoint(x), toPoint(o))));
-                    const turn = Math.min(...p.orders.map(x => angleDiff(bearing(x), bearing(o))));
-                    const base = near + turn * distanceKm(shopPoint, toPoint(o)); // ใกล้กัน + ไปทางเดียวกัน
-                    const score = rng ? base * (0.6 + rng() * 0.8) : base; // ทางเลือก: สลับลำดับความชอบเล็กน้อย
-                    if (score < pickScore) {
-                        pick = o;
-                        pickScore = score;
-                    }
-                }
-                p.orders.push(pick);
-                remaining.splice(remaining.indexOf(pick), 1);
-                added = true;
+        // ลองหลายแผน (seed ต่างกัน) แล้วเลือกแผนที่ต้นทุนรวมต่ำสุด
+        const cache = new Map<string, number>();
+        let best: { groups: any[][]; total: number } | null = null;
+        let bestVariant = variant;
+        for (let t = 0; t < tries; t++) {
+            const r = optimizeGroups(toPlan, available.length, shopPoint, makeRng(variant + t), cache);
+            if (!best || r.total < best.total - 1e-9) {
+                best = r;
+                bestVariant = variant + t;
             }
         }
-        for (const p of plans) {
-            if (p.orders.length) p.km = findBestStopOrder(p.orders.map(toPoint), shopPoint).km;
-        }
 
-        // ออเดอร์ที่จัดไม่ได้ (ไรเดอร์ไม่พอ)
-        const unassigned = pending.filter(o => !plans.some(p => p.orders.some(x => x.id === o.id)));
+        // เรียงกลุ่มตามทิศจากร้าน แล้วให้ไรเดอร์คนที่ 1, 2, 3 ... ตามลำดับ (สีเส้นทางจะคงที่)
+        const dir = (g: any[]) => {
+            const p = toPoint(g[0]);
+            const a = Math.atan2(p.lng - shopPoint.lng, p.lat - shopPoint.lat);
+            return (a + 2 * Math.PI) % (2 * Math.PI);
+        };
+        const plans = best!.groups
+            .sort((a, b) => dir(a) - dir(b))
+            .map((g, i) => ({ rider: available[i], orders: g, stops: [] as any[] }));
 
-        // ขั้นที่ 2: ของไรเดอร์ที่ได้งาน หาลำดับส่งที่ดีที่สุด แล้วคำนวณต้นทุน/กำไร
-        const routes = plans.filter(p => p.orders.length).map(p => {
+        // หาลำดับส่งที่ดีที่สุดของแต่ละคน แล้วคำนวณต้นทุน เวลา และกำไร
+        const routes = plans.map(p => {
             const opt = findBestStopOrder(p.orders.map(toPoint), shopPoint);
 
-            // สร้างรายการจุดส่งตามลำดับ พร้อมระยะทางแต่ละช่วง
             let previous: Point = shopPoint;
+            let travelKm = 0;
             p.stops = opt.order.map((idx, i) => {
                 const o = p.orders[idx];
                 const point = toPoint(o);
                 const leg = distanceKm(previous, point);
+                travelKm += leg;
                 previous = point;
+                const arrive = arrivalMinutes(travelKm, i + 1);
                 return {
                     seq: i + 1,
                     order_id: o.id,
@@ -244,6 +326,8 @@ router.post("/calculate", async (req, res) => {
                     lng: point.lng,
                     boxes: Number(o.boxes),
                     leg_km: Number(leg.toFixed(2)),
+                    arrive_minutes: Number(arrive.toFixed(1)),
+                    arrive_time: formatArrival(arrive),
                 };
             });
 
@@ -252,16 +336,20 @@ router.post("/calculate", async (req, res) => {
             const riderCost = calcRiderCost(km, boxes);
             const revenue = boxes * PRICE_PER_BOX;
             const foodCost = boxes * FOOD_COST_PER_BOX;
-            const minutes = (km / SPEED_KMH) * 60 + p.orders.length * SERVICE_MINUTES_PER_STOP;
+            const minutes = arrivalMinutes(km, p.orders.length); // ถึงลูกค้าคนสุดท้าย
 
             return {
                 rider_id: p.rider.id,
                 rider_name: p.rider.name,
+                rider_phone: p.rider.phone,
+                is_new: !!p.rider.is_new,
+                access_code: p.rider.access_code,
                 orders_count: p.orders.length,
                 total_boxes: boxes,
                 total_km: Number(km.toFixed(2)),
                 estimated_minutes: Number(minutes.toFixed(1)),
                 estimated_arrival: formatArrival(minutes),
+                on_time: minutes <= DEADLINE_MINUTES,
                 rider_cost: Number(riderCost.toFixed(2)),
                 revenue,
                 food_cost: foodCost,
@@ -270,34 +358,41 @@ router.post("/calculate", async (req, res) => {
             };
         });
 
-        // รวมค่าตัวเลขของทุกเส้นทางตาม key ที่ระบุ
         const sum = (key: string) => routes.reduce((s: any, r: any) => s + Number(r[key] || 0), 0);
+        const needMore = Math.max(0, Math.ceil(pending.length / MAX_ORDERS_PER_RIDER) - available.length);
 
         res.json({
-            method: "greedy assignment + exact stop order within each route; distances are straight-line estimates, not road routing",
-            variant,
+            method: "แบ่งกลุ่มตามทิศ + ย้าย/สลับออเดอร์ให้ต้นทุนรวมต่ำสุด + เรียงจุดส่งแบบลองทุกลำดับ (ระยะเป็นเส้นตรง ไม่ใช่ถนนจริง)",
             shop,
+            variant: bestVariant,
+            tries,
             settings: {
                 max_orders_per_rider: MAX_ORDERS_PER_RIDER,
                 estimated_speed_kmh: SPEED_KMH,
                 service_minutes_per_stop: SERVICE_MINUTES_PER_STOP,
+                price_per_box: PRICE_PER_BOX,
+                food_cost_per_box: FOOD_COST_PER_BOX,
+                trip_fee: TRIP_FEE,
+                rider_rate_per_box_km: RIDER_RATE_PER_BOX_KM,
                 delivery_window: "11:30–12:30",
             },
             routes,
-            unassigned: unassigned.map(o => ({
+            unassigned: leftover.map(o => ({
                 order_id: o.id,
-                reason: "จำนวนไรเดอร์ไม่เพียงพอ (ไรเดอร์หนึ่งคนรับได้ไม่เกิน 3 ออเดอร์)",
+                reason: `ไรเดอร์ไม่พอ (ไรเดอร์ละไม่เกิน ${MAX_ORDERS_PER_RIDER} ออเดอร์) ต้องเพิ่มไรเดอร์อีก ${needMore} คน`,
             })),
             summary: {
+                orders: pending.length,
                 orders_assigned: routes.reduce((s, r) => s + r.orders_count, 0),
-                orders_unassigned: unassigned.length,
+                orders_unassigned: leftover.length,
                 riders_used: routes.length,
                 total_km: Number(sum("total_km").toFixed(2)),
                 total_rider_cost: Number(sum("rider_cost").toFixed(2)),
                 revenue: sum("revenue"),
                 food_cost: sum("food_cost"),
                 profit_before_other_expenses: Number(sum("profit_before_other_expenses").toFixed(2)),
-                within_one_hour: routes.every(r => r.estimated_minutes <= 60),
+                within_one_hour: routes.every(r => r.on_time),
+                latest_arrival_minutes: Number(Math.max(...routes.map(r => r.estimated_minutes)).toFixed(1)),
             },
         });
     } catch (e) {
@@ -357,15 +452,33 @@ router.post("/recalculate", async (req, res) => {
             return res.status(409).json({ error: "มีออเดอร์ไม่พบหรือไม่ได้อยู่สถานะ pending; ไม่มีการบันทึก" });
         }
 
-        // ตรวจว่า rider_id ทุกตัวมีอยู่จริง
-        const [riderRows] = await cx.query(
-            `SELECT id FROM riders WHERE id IN (${assignments.map(() => "?").join(",")})`,
-            assignments.map(a => Number(a.rider_id))
-        );
-        if ((riderRows as any[]).length !== new Set(assignments.map(a => Number(a.rider_id))).size) {
-            await cx.rollback();
-            return res.status(400).json({ error: "พบ rider_id ที่ไม่มีในระบบ" });
+        // ตรวจว่า rider_id ที่ระบุ (> 0) มีอยู่จริง
+        const existingIds = [...new Set(assignments.map((a: any) => Number(a.rider_id)).filter((n: number) => n > 0))];
+        if (existingIds.length) {
+            const [riderRows] = await cx.query(
+                `SELECT id FROM riders WHERE id IN (${existingIds.map(() => "?").join(",")})`,
+                existingIds
+            );
+            if ((riderRows as any[]).length !== existingIds.length) {
+                await cx.rollback();
+                return res.status(400).json({ error: "พบ rider_id ที่ไม่มีในระบบ" });
+            }
         }
+
+        // rider_id ติดลบ = ไรเดอร์ใหม่ที่ระบบเรียกเพิ่ม -> สร้างแถวในตาราง riders
+        const realId = new Map<number, number>();
+        for (const a of assignments) {
+            const rid = Number(a.rider_id);
+            if (rid < 0 && !realId.has(rid)) {
+                const name = String(a.rider_name || `ไรเดอร์ใหม่ ${-rid}`).slice(0, 100);
+                const [ins] = await cx.query(
+                    "INSERT INTO riders(name,phone,access_code) VALUES (?,?,?)",
+                    [name, "-", `NEW${Date.now()}${-rid}`]
+                );
+                realId.set(rid, (ins as any).insertId);
+            }
+        }
+        const riderIdOf = (a: any) => (Number(a.rider_id) < 0 ? (realId.get(Number(a.rider_id)) as number) : Number(a.rider_id));
 
         // ดึงพิกัดร้าน
         const [shops] = await cx.query("SELECT lat,lng FROM shop ORDER BY id LIMIT 1");
@@ -394,9 +507,13 @@ router.post("/recalculate", async (req, res) => {
 
             const [routeResult] = await cx.query(
                 "INSERT INTO routes(rider_id,total_km,total_cost) VALUES(?,?,?)",
-                [Number(a.rider_id), Number(opt.km.toFixed(2)), Number(cost.toFixed(2))]
+                [riderIdOf(a), Number(opt.km.toFixed(2)), Number(cost.toFixed(2))]
             );
             const routeId = (routeResult as any).insertId;
+
+            // ออกเลขใบงานใหม่ให้ไรเดอร์คนนี้ (ไรเดอร์ใช้เลขนี้เข้าดูใบงานของวันนั้น)
+            const jobCode = makeJobCode(riderIdOf(a));
+            await cx.query("UPDATE riders SET access_code=? WHERE id=?", [jobCode, riderIdOf(a)]);
 
             for (let i = 0; i < ordered.length; i++) {
                 await cx.query(
@@ -408,7 +525,8 @@ router.post("/recalculate", async (req, res) => {
 
             output.push({
                 route_id: routeId,
-                rider_id: Number(a.rider_id),
+                rider_id: riderIdOf(a),
+                job_code: jobCode,
                 order_ids: ordered.map(o => o.id),
                 total_km: Number(opt.km.toFixed(2)),
                 total_cost: Number(cost.toFixed(2)),
@@ -435,7 +553,7 @@ router.post("/recalculate", async (req, res) => {
 router.get("/", async (_req, res) => {
     try {
         const [rows] = await conn.query(
-            "SELECT r.id route_id, r.rider_id, ri.name rider_name, r.total_km, r.total_cost, r.created_at, " +
+            "SELECT r.id route_id, r.rider_id, ri.name rider_name, ri.access_code rider_access_code, r.total_km, r.total_cost, r.created_at, " +
             "COUNT(rs.id) orders_count, GROUP_CONCAT(rs.order_id ORDER BY rs.seq) order_ids " +
             "FROM routes r " +
             "JOIN riders ri ON ri.id = r.rider_id " +
@@ -458,7 +576,7 @@ router.get("/:id", async (req, res) => {
         }
 
         const [routes] = await conn.query(
-            "SELECT r.*, ri.name rider_name, ri.phone rider_phone FROM routes r JOIN riders ri ON ri.id = r.rider_id WHERE r.id = ?",
+            "SELECT r.*, ri.name rider_name, ri.phone rider_phone, ri.access_code rider_access_code FROM routes r JOIN riders ri ON ri.id = r.rider_id WHERE r.id = ?",
             [id]
         );
         if (!(routes as any[]).length) {
