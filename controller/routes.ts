@@ -99,12 +99,43 @@ const seededRandom = (seed: number) => {
     };
 };
 
-// เลขใบงานของไรเดอร์ ออกใหม่ทุกครั้งที่บันทึกเส้นทาง เช่น 1013-007-48 (เดือนวัน-รหัสไรเดอร์-เลขสุ่ม) ใช้เวลาไทย
+// เลขใบงานของไรเดอร์ ออกใหม่ทุกครั้งที่บันทึกเส้นทาง เช่น 1013-00748 (เดือนวัน-รหัสไรเดอร์ 3 หลัก-เลขสุ่ม 2 หลัก)
+// ยาว 10 ตัวอักษรพอดี ตรงกับคอลัมน์ riders.access_code varchar(10) ใช้เวลาไทย
 const makeJobCode = (riderId: number) => {
     const d = new Date(Date.now() + 7 * 3600 * 1000);
     const mmdd = String(d.getUTCMonth() + 1).padStart(2, "0") + String(d.getUTCDate()).padStart(2, "0");
-    return `${mmdd}-${String(riderId).padStart(3, "0")}-${10 + Math.floor(Math.random() * 90)}`;
+    return `${mmdd}-${String(riderId).padStart(3, "0")}${10 + Math.floor(Math.random() * 90)}`;
 };
+
+// อ่านโครงสร้างตาราง riders จริง: ใช้สร้างไรเดอร์ใหม่ให้ครบคอลัมน์บังคับ และตัดเลขใบงานให้พอดีความยาวคอลัมน์
+type Col = { Field: string; Type: string; Null: string; Default: any; Extra: string };
+const colMaxLen = (c?: Col) => {
+    const m = c ? /char\((\d+)\)/i.exec(c.Type) : null;
+    return m ? Number(m[1]) : Infinity;
+};
+const fit = (text: string, len: number) => (text.length <= len ? text : text.slice(-len));
+
+async function insertRider(cx: any, cols: Col[], name: string) {
+    const by = new Map(cols.map(c => [c.Field, c]));
+    const row: Record<string, any> = {};
+    if (by.has("name")) row.name = name.slice(0, colMaxLen(by.get("name")));
+    if (by.has("phone")) row.phone = "-".slice(0, colMaxLen(by.get("phone")));
+    if (by.has("access_code")) {
+        const tmp = Math.random().toString(36).slice(2, 10).toUpperCase(); // ชั่วคราว จะถูกแทนด้วยเลขใบงานทันที
+        row.access_code = fit(tmp, colMaxLen(by.get("access_code")));
+    }
+    // คอลัมน์บังคับอื่นๆ ที่ไม่มีค่าเริ่มต้น -> เติมค่าว่าง/0
+    for (const c of cols) {
+        if (c.Field in row || c.Null === "YES" || c.Default !== null || /auto_increment|generated/i.test(c.Extra)) continue;
+        row[c.Field] = /int|decimal|float|double/i.test(c.Type) ? 0 : /date|time/i.test(c.Type) ? new Date() : "";
+    }
+    const keys = Object.keys(row);
+    const [ins] = await cx.query(
+        `INSERT INTO riders(${keys.map(k => "`" + k + "`").join(",")}) VALUES (${keys.map(() => "?").join(",")})`,
+        keys.map(k => row[k])
+    );
+    return (ins as any).insertId as number;
+}
 
 /* ========== Optimizer (แบ่งออเดอร์ให้ไรเดอร์) ========== */
 
@@ -466,16 +497,15 @@ router.post("/recalculate", async (req, res) => {
         }
 
         // rider_id ติดลบ = ไรเดอร์ใหม่ที่ระบบเรียกเพิ่ม -> สร้างแถวในตาราง riders
+        const [colRows] = await cx.query("SHOW COLUMNS FROM riders");
+        const riderCols = colRows as Col[];
+        const codeLen = colMaxLen(riderCols.find(c => c.Field === "access_code"));
         const realId = new Map<number, number>();
         for (const a of assignments) {
             const rid = Number(a.rider_id);
             if (rid < 0 && !realId.has(rid)) {
-                const name = String(a.rider_name || `ไรเดอร์ใหม่ ${-rid}`).slice(0, 100);
-                const [ins] = await cx.query(
-                    "INSERT INTO riders(name,phone,access_code) VALUES (?,?,?)",
-                    [name, "-", `NEW${Date.now()}${-rid}`]
-                );
-                realId.set(rid, (ins as any).insertId);
+                const name = String(a.rider_name || `ไรเดอร์ใหม่ ${-rid}`);
+                realId.set(rid, await insertRider(cx, riderCols, name));
             }
         }
         const riderIdOf = (a: any) => (Number(a.rider_id) < 0 ? (realId.get(Number(a.rider_id)) as number) : Number(a.rider_id));
@@ -512,7 +542,7 @@ router.post("/recalculate", async (req, res) => {
             const routeId = (routeResult as any).insertId;
 
             // ออกเลขใบงานใหม่ให้ไรเดอร์คนนี้ (ไรเดอร์ใช้เลขนี้เข้าดูใบงานของวันนั้น)
-            const jobCode = makeJobCode(riderIdOf(a));
+            const jobCode = fit(makeJobCode(riderIdOf(a)), codeLen);
             await cx.query("UPDATE riders SET access_code=? WHERE id=?", [jobCode, riderIdOf(a)]);
 
             for (let i = 0; i < ordered.length; i++) {
