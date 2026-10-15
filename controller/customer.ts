@@ -1,6 +1,7 @@
 import express from "express";
 import { conn } from "../dbconnect";
 import { Customer } from "../model/customer";
+import { cleanName, nameKey, coordKey } from "../service/customerKey";
 
 export const router = express.Router();
 
@@ -23,6 +24,40 @@ function isValidCustomer(c: Partial<Customer>): boolean {
         Number.isFinite(lat) && lat >= -90 && lat <= 90 &&
         Number.isFinite(lng) && lng >= -180 && lng <= 180
     );
+}
+
+// หาลูกค้าที่ "ชื่อซ้ำ" หรือ "พิกัดซ้ำ" กับข้อมูลที่กำลังจะบันทึก (excludeId = ตัวเองตอนแก้ไข จะได้ไม่ชนกับตัวเอง)
+// ลูกค้าแต่ละคนต้องมีชื่อ+นามสกุลไม่ซ้ำกัน และพิกัดไม่ซ้ำกัน (กติกาอยู่ที่ service/customerKey.ts)
+async function findDuplicate(
+    c: { first_name: string; last_name: string; lat: number | string; lng: number | string },
+    excludeId = 0
+): Promise<{ code: "DUPLICATE_NAME" | "DUPLICATE_COORD"; id: number; message: string } | null> {
+    // SQL คัดผู้ต้องสงสัยก่อน แล้วให้ JS ตัดสินด้วยกติกาเดียวกับที่ใช้ตอนสุ่มออเดอร์
+    const [rows] = await conn.query(
+        "SELECT id, first_name, last_name, lat, lng FROM customers WHERE id <> ? AND (" +
+        "(LOWER(TRIM(first_name)) = ? AND LOWER(TRIM(last_name)) = ?) OR " +
+        "(ROUND(lat, 6) = ROUND(?, 6) AND ROUND(lng, 6) = ROUND(?, 6))) LIMIT 20",
+        [excludeId, cleanName(c.first_name).toLowerCase(), cleanName(c.last_name).toLowerCase(), Number(c.lat), Number(c.lng)]
+    );
+    const list = rows as Customer[];
+
+    const sameName = list.find(r => nameKey(r) === nameKey(c));
+    if (sameName) {
+        return {
+            code: "DUPLICATE_NAME",
+            id: sameName.id,
+            message: `มีลูกค้าชื่อ "${sameName.first_name} ${sameName.last_name}" อยู่แล้ว (รหัส #${sameName.id}) กรุณาใช้ชื่ออื่น`,
+        };
+    }
+    const sameCoord = list.find(r => coordKey(r) === coordKey(c));
+    if (sameCoord) {
+        return {
+            code: "DUPLICATE_COORD",
+            id: sameCoord.id,
+            message: `พิกัดนี้มีลูกค้า "${sameCoord.first_name} ${sameCoord.last_name}" (รหัส #${sameCoord.id}) อยู่แล้ว ลูกค้าแต่ละคนต้องมีพิกัดไม่ซ้ำกัน`,
+        };
+    }
+    return null;
 }
 
 /* ========== READ (GET) ========== */
@@ -122,15 +157,21 @@ router.post("/", async (req, res) => {
             });
         }
 
+        // ชื่อหรือพิกัดซ้ำกับลูกค้าที่มีอยู่แล้ว -> ไม่บันทึก
+        const dup = await findDuplicate(customer);
+        if (dup) {
+            return res.status(409).json({ error: dup.message, code: dup.code, duplicate_id: dup.id });
+        }
+
         const sql =
             "INSERT INTO `customers`(`first_name`, `last_name`, `phone`, `address`, `lat`, `lng`) VALUES (?,?,?,?,?,?)";
         const [result] = await conn.query(sql, [
-            customer.first_name,
-            customer.last_name,
-            customer.phone,
-            customer.address,
-            customer.lat,
-            customer.lng,
+            cleanName(customer.first_name),
+            cleanName(customer.last_name),
+            customer.phone.trim(),
+            customer.address ?? null,
+            Number(customer.lat),
+            Number(customer.lng),
         ]);
 
         const insertResult = result as any;
@@ -139,6 +180,10 @@ router.post("/", async (req, res) => {
             last_id: insertResult.insertId,
         });
     } catch (error) {
+        // กรณีมี UNIQUE index ในฐานข้อมูล และมีคำขอซ้อนกันสองคำขอผ่านการตรวจด้านบนพร้อมกัน
+        if ((error as any)?.code === "ER_DUP_ENTRY") {
+            return res.status(409).json({ error: "ชื่อหรือพิกัดนี้มีลูกค้าอยู่แล้ว", code: "DUPLICATE" });
+        }
         console.error(error);
         res.status(500).json({ error: "Database operation failed" });
     }
@@ -171,12 +216,20 @@ router.put("/:id", async (req, res) => {
             });
         }
 
+        // ตรวจซ้ำเฉพาะเมื่อ "ชื่อหรือพิกัดเปลี่ยนจริง" (แก้แค่เบอร์/ที่อยู่ของลูกค้าเดิมที่ซ้ำอยู่ก่อนแล้วยังทำได้)
+        if (nameKey(updated) !== nameKey(existing) || coordKey(updated) !== coordKey(existing)) {
+            const dup = await findDuplicate(updated, id);
+            if (dup) {
+                return res.status(409).json({ error: dup.message, code: dup.code, duplicate_id: dup.id });
+            }
+        }
+
         // บันทึกลง DB
         const [result] = await conn.query(
             "UPDATE customers SET first_name=?, last_name=?, phone=?, address=?, lat=?, lng=? WHERE id=?",
             [
-                updated.first_name.trim(),
-                updated.last_name.trim(),
+                cleanName(updated.first_name),
+                cleanName(updated.last_name),
                 updated.phone.trim(),
                 updated.address ?? null,
                 Number(updated.lat),
@@ -187,6 +240,9 @@ router.put("/:id", async (req, res) => {
 
         res.json({ affected_row: (result as any).affectedRows, id });
     } catch (error) {
+        if ((error as any)?.code === "ER_DUP_ENTRY") {
+            return res.status(409).json({ error: "ชื่อหรือพิกัดนี้มีลูกค้าอยู่แล้ว", code: "DUPLICATE" });
+        }
         console.error(error);
         res.status(500).json({ error: "Database operation failed" });
     }

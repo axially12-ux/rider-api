@@ -1,6 +1,7 @@
 import express from "express";
 import { conn, schema } from "../dbconnect";
 import { Order } from "../model/order";
+import { CustomerLike, pickDistinctCustomers } from "../service/customerKey";
 
 export const router = express.Router();
 
@@ -108,36 +109,54 @@ router.get("/:id", async (req, res) => {
 /* ========== CREATE (POST) ========== */
 
 // สร้างออเดอร์สุ่ม 20-30 รายการ ไว้ทดสอบ   POST /order/simulate
+// กติกา: ออเดอร์ที่สุ่มได้ต้องเป็นลูกค้า "คนละชื่อ คนละพิกัด" ทุกใบ และจะไม่สุ่มซ้ำกับลูกค้าที่มีออเดอร์ค้าง (pending) อยู่แล้ว
+// ถ้าลูกค้าที่เลือกได้มีน้อยกว่า 20-30 ราย จะสร้างเท่าที่มี (ไม่วนกลับมาซ้ำคนเดิมเพื่อให้ครบจำนวน)
 router.post("/simulate", async (_req, res) => {
     try {
-        const [customers] = await conn.query("SELECT id FROM customers");
-        const ids = (customers as any[]).map(c => c.id);
+        const [customers] = await conn.query(
+            "SELECT c.id, c.first_name, c.last_name, c.lat, c.lng, " +
+            "EXISTS(SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.status = 'pending') AS has_pending " +
+            "FROM customers c ORDER BY c.id"
+        );
+        const all = customers as (CustomerLike & { has_pending: number })[];
 
-        if (!ids.length) {
+        if (!all.length) {
             return res.status(400).json({ error: "ยังไม่มีลูกค้าในระบบ" });
         }
 
-        // สุ่มจำนวนออเดอร์ 20-30 รายการ แต่ละรายการสุ่มจำนวนกล่อง 1-3
-        // สุ่มลูกค้า "ไม่ซ้ำกัน" ในรอบเดียว (สลับลำดับแล้วหยิบทีละคน)
-        // จะวนกลับมาซ้ำก็ต่อเมื่อจำนวนลูกค้ามีน้อยกว่าจำนวนออเดอร์ที่จะสร้าง
-        const shuffle = (a: number[]) => {
-            const r = [...a];
-            for (let i = r.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                [r[i], r[j]] = [r[j], r[i]];
-            }
-            return r;
-        };
-        const count = 20 + Math.floor(Math.random() * 11);
-        const values: number[][] = [];
-        let pool: number[] = [];
-        for (let i = 0; i < count; i++) {
-            if (!pool.length) pool = shuffle(ids);
-            values.push([pool.pop() as number, 1 + Math.floor(Math.random() * 3)]);
+        // คนที่มีออเดอร์ค้างอยู่ = "ใช้ไปแล้ว" ชื่อ/พิกัดของเขาจะไม่ถูกสุ่มซ้ำกับคนอื่นด้วย
+        const blocked = all.filter(c => Number(c.has_pending) === 1);
+        const candidates = all.filter(c => Number(c.has_pending) !== 1);
+        const { picked, skipped } = pickDistinctCustomers(candidates, blocked);
+
+        if (!picked.length) {
+            return res.status(409).json({
+                error: "ไม่มีลูกค้าที่สุ่มได้ (ทุกคนมีออเดอร์ค้างอยู่แล้ว หรือชื่อ/พิกัดซ้ำกัน) ล้างออเดอร์เดิมหรือแก้ข้อมูลลูกค้าก่อน",
+                customers: all.length,
+                with_pending_order: blocked.length,
+                skipped_duplicates: skipped.length,
+            });
         }
 
+        // สลับลำดับแล้วหยิบทีละคน (Fisher-Yates) จึงไม่มีใครถูกเลือกซ้ำ
+        const pool = [...picked];
+        for (let i = pool.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [pool[i], pool[j]] = [pool[j], pool[i]];
+        }
+
+        const requested = 20 + Math.floor(Math.random() * 11);
+        const count = Math.min(requested, pool.length);
+        const values = pool.slice(0, count).map(c => [c.id, 1 + Math.floor(Math.random() * 3)]); // กล่อง 1-3
+
         const [result] = await conn.query("INSERT INTO orders(customer_id, boxes) VALUES ?", [values]);
-        res.status(201).json({ affected_row: (result as any).affectedRows });
+        res.status(201).json({
+            affected_row: (result as any).affectedRows,
+            requested,
+            available_customers: picked.length,
+            skipped_duplicates: skipped.length, // ลูกค้าที่ถูกข้ามเพราะชื่อหรือพิกัดซ้ำกับคนอื่น
+            skipped_pending: blocked.length,    // ลูกค้าที่ถูกข้ามเพราะมีออเดอร์ค้างอยู่แล้ว
+        });
     } catch (e) {
         console.error(e);
         res.status(500).json({ error: "Database operation failed" });
