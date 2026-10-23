@@ -83,18 +83,6 @@ const formatArrival = (minutes: number) => {
     return `${hh}:${mm}`;
 };
 
-// ตัวสุ่มแบบกำหนด seed ได้ (ผลซ้ำได้ถ้า variant เดิม) ใช้สร้างเส้นทางทางเลือก
-const seededRandom = (seed: number) => {
-    let a = seed >>> 0;
-    return () => {
-        a = (a + 0x6d2b79f5) >>> 0;
-        let t = a;
-        t = Math.imul(t ^ (t >>> 15), t | 1);
-        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-};
-
 // เลขใบงานของไรเดอร์ ออกใหม่ทุกครั้งที่บันทึกเส้นทาง เช่น 1013-00748 (เดือนวัน-รหัสไรเดอร์ 3 หลัก-เลขสุ่ม 2 หลัก)
 // ยาว 10 ตัวอักษรพอดี ตรงกับคอลัมน์ riders.access_code varchar(10) ใช้เวลาไทย
 const makeJobCode = (riderId: number) => {
@@ -139,8 +127,9 @@ const MAX_RIDERS = 100;           // ร้านเรียกไรเดอ�
 const DEADLINE_MINUTES = 60;      // ออกส่ง 11:30 ต้องถึงลูกค้าไม่เกิน 12:30
 const LATE_PENALTY_PER_MIN = 200; // โทษถ้าส่งช้า (บาท/นาที) สูงมาก เพื่อให้ตัวคำนวณเลี่ยงแผนที่ส่งไม่ทันให้ได้มากที่สุด
 const LATE_FIXED_PENALTY = 5000;  // โทษคงที่ถ้าช้าแม้แต่นิดเดียว (เทียบเท่าเงื่อนไขเหล็ก 12:30)
+const PLAN_TRIES = 40;            // ลองจัดกลุ่มกี่แบบ (seed ต่างกัน) แล้วเลือกแบบที่ต้นทุนรวมต่ำสุดเพียงแบบเดียว
 
-// ตัวสุ่มที่กำหนด seed ได้ -> "ทางเลือกที่ N" ได้ผลเดิมทุกครั้ง
+// ตัวสุ่มที่กำหนด seed ได้ -> ผลเหมือนเดิมทุกครั้งที่คำนวณ
 function makeRng(seed: number) {
     let a = (Math.imul(seed + 1, 2654435761) >>> 0) || 1;
     return () => {
@@ -253,14 +242,10 @@ function optimizeGroups(orders: any[], riderSlots: number, shop: Point, rng: () 
 
 /* ========== CALCULATE (คำนวณเส้นทาง ยังไม่บันทึก) ========== */
 
-// พรีวิวการจัดเส้นทาง (ใช้เฉพาะออเดอร์ pending)   POST /routes/calculate
-// body (ไม่บังคับ): { variant: 0, tries: 1 }
-//   variant = หมายเลขทางเลือก (เปลี่ยนเลขเพื่อให้ได้แผนอื่น)
-//   tries   = ลองกี่แผนแล้วเลือกต้นทุนต่ำสุด (ใช้ตอน "หาแผนที่ดีที่สุด" เช่น 40)
-router.post("/calculate", async (req, res) => {
+// พรีวิวการจัดเส้นทาง (ใช้เฉพาะออเดอร์ pending)   POST /routes/calculate   (ไม่ต้องส่ง body)
+// ระบบลองจัดหลายแบบ (PLAN_TRIES) แล้วตอบกลับ "แผนที่ดีที่สุดเพียงแผนเดียว"
+router.post("/calculate", async (_req, res) => {
     try {
-        const variant = Math.max(0, Math.floor(Number(req.body?.variant) || 0));
-        const tries = Math.min(60, Math.max(1, Math.floor(Number(req.body?.tries) || 1)));
 
         // ดึงพิกัดร้าน
         const [shops] = await conn.query("SELECT id,name,lat,lng FROM shop ORDER BY id LIMIT 1");
@@ -298,7 +283,7 @@ router.post("/calculate", async (req, res) => {
         if (!pending.length) {
             return res.json({
                 message: "ไม่มีออเดอร์ pending สำหรับจัดเส้นทาง",
-                shop, routes: [], unassigned: [], summary: emptySummary, variant, tries, distance_source: "road",
+                shop, routes: [], unassigned: [], summary: emptySummary, distance_source: "road",
             });
         }
         if (!available.length) {
@@ -311,16 +296,12 @@ router.post("/calculate", async (req, res) => {
         const toPlan = byDistance.slice(0, capacity);
         const leftover = byDistance.slice(capacity);
 
-        // ลองหลายแผน (seed ต่างกัน) แล้วเลือกแผนที่ต้นทุนรวมต่ำสุด
+        // ลองหลายแผน (seed ต่างกัน) แล้วเลือกแผนที่ต้นทุนรวมต่ำสุดเพียงแผนเดียว
         const cache = new Map<string, number>();
         let best: { groups: any[][]; total: number } | null = null;
-        let bestVariant = variant;
-        for (let t = 0; t < tries; t++) {
-            const r = optimizeGroups(toPlan, available.length, shopPoint, makeRng(variant + t), cache, dist);
-            if (!best || r.total < best.total - 1e-9) {
-                best = r;
-                bestVariant = variant + t;
-            }
+        for (let t = 0; t < PLAN_TRIES; t++) {
+            const r = optimizeGroups(toPlan, available.length, shopPoint, makeRng(t), cache, dist);
+            if (!best || r.total < best.total - 1e-9) best = r;
         }
 
         // เรียงกลุ่มตามทิศจากร้าน แล้วให้ไรเดอร์คนที่ 1, 2, 3 ... ตามลำดับ (สีเส้นทางจะคงที่)
@@ -395,8 +376,6 @@ router.post("/calculate", async (req, res) => {
         res.json({
             method: "แบ่งกลุ่มตามทิศ + ย้าย/สลับออเดอร์ให้ต้นทุนรวมต่ำสุด + เรียงจุดส่งแบบลองทุกลำดับ (ระยะทางตามถนนจริง และเลี่ยงแผนที่ส่งเกิน 12:30)",
             shop,
-            variant: bestVariant,
-            tries,
             distance_source: distanceSource, // road = ระยะถนนจริงจาก OSRM, estimate = ประมาณจากเส้นตรง x 1.3 (OSRM ใช้ไม่ได้ชั่วคราว)
             settings: {
                 max_orders_per_rider: MAX_ORDERS_PER_RIDER,
