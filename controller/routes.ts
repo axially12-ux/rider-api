@@ -1,6 +1,6 @@
 import express from "express";
 import { conn, schema } from "../dbconnect";
-import { buildDistance, DistFn, Point, haversineKm } from "../service/road";
+import { buildDistance, DistFn, Point } from "../service/road";
 
 export const router = express.Router();
 

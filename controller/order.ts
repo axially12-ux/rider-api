@@ -12,10 +12,6 @@ const ORDER_COLUMNS =
     "o.id, o.customer_id, o.boxes, o.status, o.created_at, " +
     "c.first_name, c.last_name, c.phone, c.address, c.lat, c.lng";
 
-// SQL พื้นฐานสำหรับดึงออเดอร์ JOIN ลูกค้า
-const SELECT_ORDER =
-    `SELECT ${ORDER_COLUMNS} FROM orders o JOIN customers c ON c.id = o.customer_id`;
-
 // ออเดอร์ + ไรเดอร์ที่รับงาน + เวลาส่งจริง (ใช้กับหน้ารายการ/รายละเอียดออเดอร์)
 // หาเส้นทางล่าสุดที่ออเดอร์นี้อยู่ แล้วโยงไปถึงไรเดอร์ (ออเดอร์ pending ยังไม่มีไรเดอร์ -> NULL)
 // rider_access_code แสดงเฉพาะเมื่อเป็นเลขใบงานปัจจุบันของไรเดอร์ (เลขเก่าถูกแทนที่แล้วจะไม่แสดง)
