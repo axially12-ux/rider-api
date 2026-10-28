@@ -237,7 +237,7 @@ router.put("/:id", async (req, res) => {
 
 /* ========== DELETE ========== */
 
-// ลบออเดอร์ทั้งหมด (อันตราย! ใช้ล้างข้อมูลทดสอบเท่านั้น)   DELETE /order
+
 router.delete("/", async (_req, res) => {
     try {
         const [result] = await conn.query("DELETE FROM orders");
@@ -248,7 +248,7 @@ router.delete("/", async (_req, res) => {
     }
 });
 
-// ลบออเดอร์ 1 รายการ   DELETE /order/1
+
 router.delete("/:id", async (req, res) => {
     try {
         if (!validId(req.params.id)) {
