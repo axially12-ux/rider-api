@@ -71,7 +71,7 @@ router.get("/nearby", async (req, res) => {
                 FROM orders o
                 JOIN customers c ON c.id = o.customer_id
             ) t
-            WHERE distance_km <= 3
+            WHERE distance_km <= 2
             ORDER BY distance_km
         `;
         const [rows] = await conn.query(sql, [lat, lng, lat]);
