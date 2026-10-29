@@ -370,7 +370,38 @@ router.post("/calculate", async (_req, res) => {
             };
         });
 
-        
+        // สรุปภาพรวมทั้งแผน (หน้า planner อ่านค่าจาก summary)
+        const sum = (f: (r: (typeof routes)[number]) => number) => routes.reduce((t, r) => t + f(r), 0);
+        const lateRiders = routes.filter(r => !r.on_time).length;
+        const latestMinutes = Math.max(0, ...routes.map(r => r.estimated_minutes));
+
+        // ออเดอร์ที่ไรเดอร์ไม่พอ -> แจ้งเป็น unassigned
+        const unassigned = leftover.map(o => ({
+            order_id: o.id,
+            reason: `ไรเดอร์ไม่พอ (ไรเดอร์คนละไม่เกิน ${MAX_ORDERS_PER_RIDER} ออเดอร์ และเรียกเพิ่มได้สูงสุด ${MAX_RIDERS} คน)`,
+        }));
+
+        // ส่งผลลัพธ์กลับไปให้หน้าเว็บ (ของเดิมไม่มีบรรทัดนี้ คำขอเลยค้างไม่ตอบ)
+        return res.json({
+            shop,
+            routes,
+            unassigned,
+            summary: {
+                orders: pending.length,
+                orders_assigned: sum(r => r.orders_count),
+                orders_unassigned: unassigned.length,
+                riders_used: routes.length,
+                total_km: Number(sum(r => r.total_km).toFixed(2)),
+                total_rider_cost: Number(sum(r => r.rider_cost).toFixed(2)),
+                revenue: sum(r => r.revenue),
+                food_cost: sum(r => r.food_cost),
+                profit_before_other_expenses: Number(sum(r => r.profit_before_other_expenses).toFixed(2)),
+                within_one_hour: lateRiders === 0,
+                latest_arrival_minutes: Number(latestMinutes.toFixed(1)),
+                late_riders: lateRiders,
+            },
+            distance_source: distanceSource,
+        });
     } catch (e) {
         console.error(e);
         res.status(500).json({
