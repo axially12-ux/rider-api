@@ -343,11 +343,11 @@ router.post("/calculate", async (_req, res) => {
                 };
             });
 
-            const km = opt.km;
-            const boxes = p.orders.reduce((s, o) => s + Number(o.boxes), 0);
-            const riderCost = calcRiderCost(km, boxes);
-            const revenue = boxes * PRICE_PER_BOX;
-            const foodCost = boxes * FOOD_COST_PER_BOX;
+            const km = opt.km;// ระยะทางรวมของไรเดอร์คนนี้ (กม.)
+            const boxes = p.orders.reduce((s, o) => s + Number(o.boxes), 0);// จำนวนกล่องรวมของไรเดอร์คนนี้
+            const riderCost = calcRiderCost(km, boxes);// ค่าตอบแทนไรเดอร์
+            const revenue = boxes * PRICE_PER_BOX;// รายได้จากลูกค้า
+            const foodCost = boxes * FOOD_COST_PER_BOX;// ต้นทุนอาหารต่อกล่อง
             const minutes = arrivalMinutes(km, p.orders.length); // ถึงลูกค้าคนสุดท้าย
 
             return {
@@ -365,48 +365,12 @@ router.post("/calculate", async (_req, res) => {
                 rider_cost: Number(riderCost.toFixed(2)),
                 revenue,
                 food_cost: foodCost,
-                profit_before_other_expenses: Number((revenue - foodCost - riderCost).toFixed(2)),
+                profit_before_other_expenses: Number((revenue - foodCost - riderCost).toFixed(2)),// กำไรก่อนค่าใช้จ่ายอื่นๆ
                 stops: p.stops,
             };
         });
 
-        const sum = (key: string) => routes.reduce((s: any, r: any) => s + Number(r[key] || 0), 0);
-        const needMore = Math.max(0, Math.ceil(pending.length / MAX_ORDERS_PER_RIDER) - available.length);
-
-        res.json({
-            method: "แบ่งกลุ่มตามทิศ + ย้าย/สลับออเดอร์ให้ต้นทุนรวมต่ำสุด + เรียงจุดส่งแบบลองทุกลำดับ (ระยะทางตามถนนจริง และเลี่ยงแผนที่ส่งเกิน 12:30)",
-            shop,
-            distance_source: distanceSource, // road = ระยะถนนจริงจาก OSRM, estimate = ประมาณจากเส้นตรง x 1.3 (OSRM ใช้ไม่ได้ชั่วคราว)
-            settings: {
-                max_orders_per_rider: MAX_ORDERS_PER_RIDER,
-                estimated_speed_kmh: SPEED_KMH,
-                service_minutes_per_stop: SERVICE_MINUTES_PER_STOP,
-                price_per_box: PRICE_PER_BOX,
-                food_cost_per_box: FOOD_COST_PER_BOX,
-                trip_fee: TRIP_FEE,
-                rider_rate_per_box_km: RIDER_RATE_PER_BOX_KM,
-                delivery_window: "11:30–12:30",
-            },
-            routes,
-            unassigned: leftover.map(o => ({
-                order_id: o.id,
-                reason: `ไรเดอร์ไม่พอ (ไรเดอร์ละไม่เกิน ${MAX_ORDERS_PER_RIDER} ออเดอร์) ต้องเพิ่มไรเดอร์อีก ${needMore} คน`,
-            })),
-            summary: {
-                orders: pending.length,
-                orders_assigned: routes.reduce((s, r) => s + r.orders_count, 0),
-                orders_unassigned: leftover.length,
-                riders_used: routes.length,
-                total_km: Number(sum("total_km").toFixed(2)),
-                total_rider_cost: Number(sum("rider_cost").toFixed(2)),
-                revenue: sum("revenue"),
-                food_cost: sum("food_cost"),
-                profit_before_other_expenses: Number(sum("profit_before_other_expenses").toFixed(2)),
-                within_one_hour: routes.every(r => r.on_time),
-                late_riders: routes.filter(r => !r.on_time).length,
-                latest_arrival_minutes: Number(Math.max(...routes.map(r => r.estimated_minutes)).toFixed(1)),
-            },
-        });
+        
     } catch (e) {
         console.error(e);
         res.status(500).json({
